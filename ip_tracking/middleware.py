@@ -7,19 +7,40 @@ class IPLoggingMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
+        from django.utils import timezone
         # Get IP address
         ip = self.get_client_ip(request)
-        
-        # Check if IP is blocked
+        # Block request if IP is blacklisted
+        from .models import BlockedIP
         if BlockedIP.objects.filter(ip_address=ip).exists():
             return HttpResponseForbidden("IP blocked")
-        
-        # Log the request
+
+        # Geolocation lookup with caching
+        from django.core.cache import cache
+        country, city = None, None
+        cache_key = f'geo_{ip}'
+        geo = cache.get(cache_key)
+        if geo:
+            country, city = geo.get('country'), geo.get('city')
+        else:
+            try:
+                from ipgeolocation import IpGeolocationAPI
+                api = IpGeolocationAPI()
+                geo_data = api.get_geolocation(ip_address=ip)
+                country = geo_data.get('country_name')
+                city = geo_data.get('city')
+                cache.set(cache_key, {'country': country, 'city': city}, 60 * 60 * 24)  # 24 hours
+            except Exception:
+                country, city = None, None
+
+        # Log the request with geolocation
         RequestLog.objects.create(
             ip_address=ip,
-            path=request.path
+            timestamp=timezone.now(),
+            path=request.path,
+            country=country,
+            city=city
         )
-        
         response = self.get_response(request)
         return response
 
